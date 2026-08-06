@@ -1,16 +1,26 @@
 /**
- * Neon PostgreSQL connection.
+ * PostgreSQL connection (works with Supabase, Neon, or any Postgres).
  *
- * REQUIRES:  npm install @neondatabase/serverless
+ * Uses postgres.js, whose tagged-template `sql`...`` API is what every query in
+ * this app relies on — so the database provider can change with only the
+ * connection string.
  *
- * Then add your connection string:
- *   Local dev  →  .dev.vars     DATABASE_URL=postgres://...
- *   Cloudflare →  wrangler secret put DATABASE_URL
+ *   Local dev  →  DATABASE_URL=postgres://... in .env
+ *   Production →  set DATABASE_URL as a host secret (Render, etc.)
+ *
+ * For Supabase, use the connection *pooler* string (Session or Transaction).
+ * `prepare: false` keeps it compatible with transaction-mode poolers
+ * (Supabase :6543 / Neon -pooler), which don't support prepared statements.
  */
+import postgres from "postgres";
 
-import { neon } from "@neondatabase/serverless";
+type Postgres = ReturnType<typeof postgres>;
 
-export function getDb() {
+let _sql: Postgres | undefined;
+
+export function getDb(): Postgres {
+  if (_sql) return _sql;
+
   const url =
     (typeof process !== "undefined" ? process.env?.DATABASE_URL : undefined) ||
     ((globalThis as Record<string, unknown>).DATABASE_URL as string | undefined);
@@ -18,13 +28,21 @@ export function getDb() {
   if (!url) {
     throw new Error(
       "DATABASE_URL is not set.\n" +
-        "  Local dev: add DATABASE_URL=postgres://... to .dev.vars\n" +
-        "  Cloudflare: run  wrangler secret put DATABASE_URL",
+        "  Local dev: add DATABASE_URL=postgres://... to .env\n" +
+        "  Production: set DATABASE_URL as a host secret",
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-  return neon(url) as ReturnType<typeof neon>;
+  _sql = postgres(url, {
+    ssl: "require",
+    prepare: false, // required for transaction-mode poolers (Supabase :6543 / Neon -pooler)
+    // Serverless (Vercel): each function instance keeps a tiny pool and releases
+    // idle connections quickly, so many instances don't exhaust the DB. Point
+    // DATABASE_URL at Supabase's Transaction pooler (:6543) in production.
+    max: 1,
+    idle_timeout: 20,
+  });
+  return _sql;
 }
 
-export type Sql = ReturnType<typeof getDb>;
+export type Sql = Postgres;

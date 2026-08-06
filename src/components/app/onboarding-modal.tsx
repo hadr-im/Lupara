@@ -12,14 +12,14 @@ const STORAGE_KEY = "nucleus_onboarding_seen_v1";
 const STEPS = [
   {
     id: "welcome",
-    title: "Welcome to Nucleus",
+    title: "Welcome to Lupara",
     subtitle: "Your AIESEC Operations OS",
     icon: Sparkles,
     iconColor: "from-purple-500 to-fuchsia-500",
     content: (
       <div className="space-y-4">
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Nucleus is a unified operations platform for managing AIESEC events and departments.
+          Lupara is a unified operations platform for managing AIESEC events and departments.
           It brings together sales pipelines, task boards, team coordination, and experience
           planning in one place — tailored to your role.
         </p>
@@ -116,7 +116,7 @@ const STEPS = [
     content: (
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          Nucleus uses role-based access. Each user is assigned one of these roles by an admin.
+          Lupara uses role-based access. Each user is assigned one of these roles by an admin.
         </p>
         <div className="space-y-2">
           {[
@@ -141,7 +141,7 @@ const STEPS = [
   {
     id: "ready",
     title: "You're all set!",
-    subtitle: "Start exploring Nucleus",
+    subtitle: "Start exploring Lupara",
     icon: CheckCircle2,
     iconColor: "from-green-500 to-emerald-500",
     content: (

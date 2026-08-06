@@ -4,9 +4,10 @@ import { Topbar } from "@/components/app/topbar";
 import { Avatar } from "@/components/app/avatar";
 import { useAuth } from "@/lib/auth-context";
 import { useNotifications } from "@/lib/notifications-context";
-import { workspaceMembers, type PmTask } from "@/lib/mock/data";
+import { type PmTask } from "@/lib/mock/data";
 import { getPmTasks, upsertPmTask } from "@/lib/db/server-fns";
 import { cn } from "@/lib/utils";
+import { DatePicker } from "@/components/ui/date-picker";
 import { toast } from "sonner";
 import {
   Plus, X, ClipboardList, Clock, CheckCircle2, Circle,
@@ -45,7 +46,7 @@ const EMPTY_FORM = {
 
 function PmTasksPage() {
   const { workspace } = Route.useParams();
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, managedUsers } = useAuth();
   const { push } = useNotifications();
 
   const [tasks, setTasks] = useState<PmTask[]>([]);
@@ -61,15 +62,12 @@ function PmTasksPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [publishOnSave, setPublishOnSave] = useState(false);
 
-  // Only non-OC members of this workspace (assignable targets)
+  // Real members of this workspace (the accounts that actually log in).
+  // Managed users are created by the admin; static workspaceMembers only holds
+  // the admin accounts, so they were never valid assignees/notification targets.
   const assignableMembers = useMemo(
-    () =>
-      workspaceMembers.filter(
-        (m) =>
-          (m.workspaceId === workspace || m.role === "admin") &&
-          m.role !== "oc",
-      ),
-    [workspace],
+    () => managedUsers.filter((m) => m.workspaceId === workspace),
+    [managedUsers, workspace],
   );
 
   const canEdit = isAdmin;
@@ -204,20 +202,18 @@ function PmTasksPage() {
     now: string,
   ) {
     if (f.assignedTo === "all") {
-      // Push a notification for each non-OC member in this workspace
-      assignableMembers
-        .filter((m) => m.workspaceId === workspace || m.role === "ocp")
-        .forEach((m) => {
-          push({
-            type: "task_assigned",
-            title: "New task assigned to you",
-            message: `"${f.title}" — assigned to all members by admin.`,
-            taskId,
-            targetRole: m.role,
-            targetUserId: m.id,
-            workspaceId: workspace,
-          });
+      // Notify every real member of this workspace.
+      assignableMembers.forEach((m) => {
+        push({
+          type: "task_assigned",
+          title: "New task assigned to you",
+          message: `"${f.title}" — assigned to all members by admin.`,
+          taskId,
+          targetRole: m.role,
+          targetUserId: m.id,
+          workspaceId: workspace,
         });
+      });
     } else if (assignedMember) {
       push({
         type: "task_assigned",
@@ -389,11 +385,10 @@ function PmTasksPage() {
               {/* Due date */}
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">Due Date</label>
-                <input
-                  type="date"
+                <DatePicker
                   value={form.dueDate}
-                  onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
-                  className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  onChange={(v) => setForm({ ...form, dueDate: v })}
+                  placeholder="Pick a due date"
                 />
               </div>
 

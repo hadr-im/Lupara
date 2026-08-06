@@ -1,4 +1,4 @@
-import { Search, Bell, Sparkles, Plus, Command, X, ShieldAlert, ShieldCheck, LayoutDashboard, TrendingUp, Sparkles as SparklesIcon, Truck, Megaphone, Globe2, FileText, Users, Settings, CalendarDays } from "lucide-react";
+import { Search, Bell, Sparkles, Plus, Command, X, ShieldAlert, ShieldCheck, ShieldX, LayoutDashboard, TrendingUp, Sparkles as SparklesIcon, Truck, Megaphone, Globe2, FileText, Users, Settings, CalendarDays } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { useNotifications } from "@/lib/notifications-context";
 import { useParams } from "@tanstack/react-router";
@@ -38,7 +38,7 @@ export function Topbar({
   const notifsRef = useRef<HTMLDivElement>(null);
 
   const { notifications, unreadCount, markRead, markAllRead, push } = useNotifications();
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, managedUsers } = useAuth();
 
   const handleValidateLead = async (e: React.MouseEvent, notification: any) => {
     e.stopPropagation();
@@ -103,6 +103,20 @@ export function Topbar({
       });
 
       markRead(notification.id);
+
+      if (lead.assigneeId) {
+        const submitter = managedUsers.find((m) => m.id === lead.assigneeId);
+        push({
+          type: "lead_rejected",
+          title: "Lead not approved",
+          message: `"${lead.company}" was not approved by admin.`,
+          leadId: lead.id,
+          targetRole: submitter?.role ?? "oc",
+          targetUserId: lead.assigneeId,
+          workspaceId: lead.workspaceId,
+        });
+      }
+
       toast.success(`${lead.company} rejected`);
     } catch (err) {
       console.error(err);
@@ -243,7 +257,9 @@ export function Topbar({
                             )}
                           >
                             <div className="mt-0.5 shrink-0">
-                              {n.type === "lead_pending" ? (
+                              {n.type === "lead_rejected" || n.type === "review_rejected" ? (
+                                <ShieldX className="h-4 w-4 text-destructive" />
+                              ) : n.type === "lead_pending" || n.type === "review_submitted" ? (
                                 <ShieldAlert className="h-4 w-4 text-warning" />
                               ) : (
                                 <ShieldCheck className="h-4 w-4 text-success" />

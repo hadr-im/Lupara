@@ -1,12 +1,30 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getDb } from "./index";
+import { authedDb, adminDb, workspaceDb, requireUser } from "./session.server";
+
+// Normalize a date/timestamp column to a "YYYY-MM-DD" string. The Neon driver
+// returns timestamptz columns as JS Date objects, so calling .slice() on them
+// directly throws ("r.due_date.slice is not a function"). We format using LOCAL
+// date components (not toISOString/UTC): dates are written as bare "YYYY-MM-DD"
+// strings and stored as local-midnight timestamps, so reading them back in the
+// same server timezone recovers the intended calendar day (UTC would shift it).
+function dateOnly(v: any): string | undefined {
+  if (!v) return undefined;
+  if (v instanceof Date) {
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, "0");
+    const d = String(v.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return String(v).slice(0, 10);
+}
 
 // --- Leads (Sales CRM) --------------------------------------------------------
 
 export const getLeads = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
     const rows = wsId
       ? await sql`
@@ -77,7 +95,7 @@ export const upsertLead = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `lead-${Date.now()}`;
     await sql`
       INSERT INTO leads (
@@ -110,7 +128,7 @@ export const upsertLead = createServerFn({ method: "POST" })
 export const deleteLead = createServerFn({ method: "POST" })
   .inputValidator((data: { id: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await adminDb();
     await sql`DELETE FROM leads WHERE id = ${input.id}`;
     return { ok: true };
   });
@@ -120,11 +138,11 @@ export const deleteLead = createServerFn({ method: "POST" })
 export const getMeetings = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
     const rows = await sql`
       SELECT * FROM meetings
-      WHERE (${wsId} IS NULL OR workspace_id = ${wsId})
+      WHERE (${wsId}::text IS NULL OR workspace_id = ${wsId})
       ORDER BY scheduled_date ASC, scheduled_time ASC
     `;
     return rows.map((r: any) => ({
@@ -132,7 +150,7 @@ export const getMeetings = createServerFn({ method: "GET" })
       workspaceId: r.workspace_id,
       leadId: r.lead_id,
       partnerName: r.company,
-      date: r.scheduled_date ? r.scheduled_date.slice(0, 10) : "",
+      date: dateOnly(r.scheduled_date) ?? "",
       time: r.scheduled_time,
       location: r.location,
       format: r.format,
@@ -163,7 +181,7 @@ export const upsertMeeting = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `mtg-${Date.now()}`;
     await sql`
       INSERT INTO meetings (
@@ -191,7 +209,7 @@ export const upsertMeeting = createServerFn({ method: "POST" })
 export const deleteMeeting = createServerFn({ method: "POST" })
   .inputValidator((data: { id: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`DELETE FROM meetings WHERE id = ${input.id}`;
     return { ok: true };
   });
@@ -199,13 +217,16 @@ export const deleteMeeting = createServerFn({ method: "POST" })
 export const getCalendarEvents = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
-    return sql`
+    const rows = (await sql`
       SELECT * FROM calendar_events
-      WHERE (${wsId} IS NULL OR workspace_id = ${wsId})
+      WHERE (${wsId}::text IS NULL OR workspace_id = ${wsId})
       ORDER BY date ASC, time ASC
-    `;
+    `) as any[];
+    // date is timestamptz (a Date object over the wire) — normalize to a string
+    // so the client can slice/compare it safely.
+    return rows.map((r: any) => ({ ...r, date: dateOnly(r.date) ?? "" }));
   });
 
 export const upsertCalendarEvent = createServerFn({ method: "POST" })
@@ -225,7 +246,7 @@ export const upsertCalendarEvent = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `cal-${Date.now()}`;
     await sql`
       INSERT INTO calendar_events (
@@ -253,7 +274,7 @@ export const upsertCalendarEvent = createServerFn({ method: "POST" })
 export const deleteCalendarEvent = createServerFn({ method: "POST" })
   .inputValidator((data: { id: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await adminDb();
     await sql`DELETE FROM calendar_events WHERE id = ${input.id}`;
     return { ok: true };
   });
@@ -264,15 +285,15 @@ export const deleteCalendarEvent = createServerFn({ method: "POST" })
 export const getTasks = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string; areaId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
     const aId = input?.areaId ?? null;
     const rows = await sql`
       SELECT t.*, u.name AS assignee_name, u.hue AS assignee_hue
       FROM tasks t
       LEFT JOIN users u ON u.id = t.assignee_id
-      WHERE (${wsId} IS NULL OR t.workspace_id = ${wsId})
-        AND (${aId}  IS NULL OR t.area_id      = ${aId})
+      WHERE (${wsId}::text IS NULL OR t.workspace_id = ${wsId})
+        AND (${aId}::text  IS NULL OR t.area_id      = ${aId})
       ORDER BY t.updated_at DESC
     `;
     return rows.map((r: any) => ({
@@ -283,7 +304,7 @@ export const getTasks = createServerFn({ method: "GET" })
       description: r.description,
       status: r.status,
       priority: r.priority,
-      dueDate: r.due_date ? r.due_date.slice(0, 10) : undefined,
+      dueDate: dateOnly(r.due_date),
       assigneeId: r.assignee_id,
       tags: r.tags || [],
       reviewLink: r.review_link,
@@ -312,7 +333,7 @@ export const upsertTask = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `task-${Date.now()}`;
     await sql`
       INSERT INTO tasks (
@@ -341,7 +362,7 @@ export const getPrPeople = createServerFn({ method: "GET" })
     (data: { workspaceId?: string; type?: "speaker" | "media" } | undefined) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS biography TEXT`;
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS image_url TEXT`;
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS linkedin_url TEXT`;
@@ -353,8 +374,8 @@ export const getPrPeople = createServerFn({ method: "GET" })
     const type = input?.type ?? null;
     const rows = await sql`
       SELECT * FROM pr_people
-      WHERE (${wsId} IS NULL OR workspace_id = ${wsId})
-        AND (${type} IS NULL OR type = ${type})
+      WHERE (${wsId}::text IS NULL OR workspace_id = ${wsId})
+        AND (${type}::text IS NULL OR type = ${type})
       ORDER BY updated_at DESC
     `;
     return rows.map((r: any) => ({
@@ -369,7 +390,7 @@ export const getPrPeople = createServerFn({ method: "GET" })
       mediaType: r.media_type,
       stage: r.stage,
       stageNotes: r.stage_notes || {},
-      confirmedDate: r.confirmed_date ? r.confirmed_date.slice(0, 10) : undefined,
+      confirmedDate: dateOnly(r.confirmed_date),
       confirmedTime: r.confirmed_time,
       rejectedReason: r.rejected_reason,
       assigneeId: r.assignee_id,
@@ -409,7 +430,7 @@ export const upsertPrPerson = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS biography TEXT`;
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS image_url TEXT`;
     await sql`ALTER TABLE pr_people ADD COLUMN IF NOT EXISTS linkedin_url TEXT`;
@@ -458,11 +479,11 @@ export const upsertPrPerson = createServerFn({ method: "POST" })
 export const getLogisticsItems = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
     const rows = await sql`
       SELECT * FROM logistics_items
-      WHERE (${wsId} IS NULL OR workspace_id = ${wsId})
+      WHERE (${wsId}::text IS NULL OR workspace_id = ${wsId})
       ORDER BY updated_at DESC
     `;
     return rows.map((r: any) => ({
@@ -505,7 +526,7 @@ export const upsertLogisticsItem = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `log-${Date.now()}`;
     await sql`
       INSERT INTO logistics_items (
@@ -535,11 +556,11 @@ export const upsertLogisticsItem = createServerFn({ method: "POST" })
 export const getPmTasks = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     const wsId = input?.workspaceId ?? null;
     const rows = await sql`
       SELECT * FROM pm_tasks
-      WHERE (${wsId} IS NULL OR workspace_id = ${wsId})
+      WHERE (${wsId}::text IS NULL OR workspace_id = ${wsId})
       ORDER BY created_at DESC
     `;
     return rows.map((r: any) => ({
@@ -549,7 +570,7 @@ export const getPmTasks = createServerFn({ method: "GET" })
       description: r.description,
       priority: r.priority,
       status: r.status,
-      dueDate: r.due_date ? r.due_date.slice(0, 10) : undefined,
+      dueDate: dateOnly(r.due_date),
       assignedTo: r.assigned_to,
       assignedToName: r.assigned_to_name,
       assignedToHue: r.assigned_to_hue,
@@ -576,8 +597,12 @@ export const upsertPmTask = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     const id = input.id ?? `pt-${Date.now()}`;
+    // created_by references users(id), but members live in localStorage (the DB
+    // users table stays empty), so that FK rejects every insert. Drop it — it's
+    // incompatible with how this app manages accounts. Idempotent.
+    await sql`ALTER TABLE pm_tasks DROP CONSTRAINT IF EXISTS pm_tasks_created_by_fkey`;
     await sql`
       INSERT INTO pm_tasks (
         id, workspace_id, title, description, priority, status, due_date,
@@ -603,7 +628,7 @@ export const upsertPmTask = createServerFn({ method: "POST" })
 
 export const getEventDates = createServerFn({ method: "GET" }).handler(
   async () => {
-    const sql = getDb();
+    const sql = await authedDb();
     const rows = await sql`SELECT workspace_id, event_date::TEXT FROM event_dates`;
     return Object.fromEntries(
       (rows as { workspace_id: string; event_date: string }[]).map((r) => [
@@ -619,7 +644,7 @@ export const setEventDate = createServerFn({ method: "POST" })
     (data: { workspaceId: string; date: string; updatedBy?: string }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`
       INSERT INTO event_dates (workspace_id, event_date, updated_by, updated_at)
       VALUES (${input.workspaceId}, ${input.date}, ${input.updatedBy ?? null}, NOW())
@@ -633,23 +658,115 @@ export const setEventDate = createServerFn({ method: "POST" })
 
 // --- Notifications ------------------------------------------------------------
 
+// Returns every notification the given user should see: those targeted directly
+// at them, plus role-wide broadcasts (target_user_id NULL) for their role —
+// admins see admin broadcasts across all workspaces, everyone else only within
+// their own workspace. Mirrors the client-side visibility rules.
 export const getNotifications = createServerFn({ method: "GET" })
-  .inputValidator((data: { userId: string }) => data)
-  .handler(async ({ data: input }) => {
+  .inputValidator(
+    (data: { userId: string; role?: string; workspaceId?: string | null }) => data,
+  )
+  .handler(async () => {
+    // Identity comes from the session, NOT client input — a caller can only ever
+    // read their own notifications (direct + role-broadcast for their workspace).
+    const me = await requireUser();
     const sql = getDb();
-    return sql`
+    const wsId = me.workspaceId ?? null;
+    const rows = (await sql`
       SELECT * FROM notifications
-      WHERE target_user_id = ${input.userId}
+      WHERE target_user_id = ${me.id}
+         OR (
+           target_user_id IS NULL
+           AND target_role = ${me.role}
+           AND (${me.role}::text = 'admin' OR workspace_id = ${wsId})
+         )
       ORDER BY created_at DESC
-      LIMIT 50
-    `;
+      LIMIT 100
+    `) as any[];
+    return rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      title: r.title,
+      message: r.message,
+      leadId: r.lead_id ?? undefined,
+      taskId: r.task_id ?? undefined,
+      targetRole: r.target_role,
+      targetUserId: r.target_user_id,
+      workspaceId: r.workspace_id,
+      read: Boolean(r.read),
+      createdAt:
+        r.created_at instanceof Date
+          ? r.created_at.toISOString()
+          : String(r.created_at),
+    }));
+  });
+
+export const addNotification = createServerFn({ method: "POST" })
+  .inputValidator(
+    (data: {
+      id?: string;
+      type: string;
+      title: string;
+      message: string;
+      leadId?: string | null;
+      taskId?: string | null;
+      targetRole?: string | null;
+      targetUserId?: string | null;
+      workspaceId: string;
+    }) => data,
+  )
+  .handler(async ({ data: input }) => {
+    const sql = await authedDb();
+    const id = input.id ?? `notif-${Date.now()}`;
+    try {
+      await sql`
+        INSERT INTO notifications (
+          id, type, title, message, lead_id, task_id,
+          target_role, target_user_id, workspace_id, read
+        ) VALUES (
+          ${id}, ${input.type}, ${input.title}, ${input.message},
+          ${input.leadId ?? null}, ${input.taskId ?? null},
+          ${input.targetRole ?? null}, ${input.targetUserId ?? null},
+          ${input.workspaceId}, FALSE
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+      return { id, ok: true };
+    } catch {
+      // A stale lead_id/workspace_id reference shouldn't crash the caller.
+      return { id, ok: false };
+    }
   });
 
 export const markNotificationRead = createServerFn({ method: "POST" })
   .inputValidator((data: { id: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`UPDATE notifications SET read = TRUE WHERE id = ${input.id}`;
+    return { ok: true };
+  });
+
+export const markAllNotificationsRead = createServerFn({ method: "POST" })
+  .inputValidator(
+    (data: { userId: string; role?: string; workspaceId?: string | null }) => data,
+  )
+  .handler(async () => {
+    // Identity from the session — a caller can only mark their own as read.
+    const me = await requireUser();
+    const sql = getDb();
+    const wsId = me.workspaceId ?? null;
+    await sql`
+      UPDATE notifications SET read = TRUE
+      WHERE read = FALSE
+        AND (
+          target_user_id = ${me.id}
+          OR (
+            target_user_id IS NULL
+            AND target_role = ${me.role}
+            AND (${me.role}::text = 'admin' OR workspace_id = ${wsId})
+          )
+        )
+    `;
     return { ok: true };
   });
 
@@ -658,7 +775,7 @@ export const markNotificationRead = createServerFn({ method: "POST" })
 export const getUserByEmail = createServerFn({ method: "GET" })
   .inputValidator((data: { email: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await adminDb();
     const rows = await sql`SELECT * FROM users WHERE email = ${input.email} LIMIT 1`;
     return (rows as unknown[])[0] ?? null;
   });
@@ -678,7 +795,7 @@ export const upsertUser = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await adminDb();
     await sql`
       INSERT INTO users (id, name, email, password_hash, role, workspace_id, key_area_id, hue, status)
       VALUES (
@@ -711,7 +828,7 @@ export const addActivityLog = createServerFn({ method: "POST" })
     }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`
       INSERT INTO activity_log (workspace_id, area_id, who, who_hue, action, target, type, tone)
       VALUES (
@@ -727,7 +844,7 @@ export const addActivityLog = createServerFn({ method: "POST" })
 
 export const getEventGoals = createServerFn({ method: "GET" }).handler(
   async () => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`
       CREATE TABLE IF NOT EXISTS event_goals (
         workspace_id TEXT PRIMARY KEY,
@@ -750,7 +867,7 @@ export const setEventGoal = createServerFn({ method: "POST" })
     (data: { workspaceId: string; goal: number }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await authedDb();
     await sql`
       CREATE TABLE IF NOT EXISTS event_goals (
         workspace_id TEXT PRIMARY KEY,
@@ -773,7 +890,7 @@ export const setEventGoal = createServerFn({ method: "POST" })
 export const getTalks = createServerFn({ method: "GET" })
   .inputValidator((data: { workspaceId?: string } | undefined) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input?.workspaceId);
     await sql`
       CREATE TABLE IF NOT EXISTS event_talks (
         id TEXT PRIMARY KEY,
@@ -801,7 +918,7 @@ export const upsertTalk = createServerFn({ method: "POST" })
     (data: { id?: string; workspaceId: string; name: string; type: "talk" | "panel" }) => data,
   )
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await workspaceDb(input.workspaceId);
     await sql`
       CREATE TABLE IF NOT EXISTS event_talks (
         id TEXT PRIMARY KEY,
@@ -825,7 +942,7 @@ export const upsertTalk = createServerFn({ method: "POST" })
 export const deleteTalk = createServerFn({ method: "POST" })
   .inputValidator((data: { id: string }) => data)
   .handler(async ({ data: input }) => {
-    const sql = getDb();
+    const sql = await adminDb();
     await sql`DELETE FROM event_talks WHERE id = ${input.id}`;
     return { ok: true };
   });

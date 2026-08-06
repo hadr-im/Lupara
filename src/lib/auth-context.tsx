@@ -6,26 +6,22 @@ import React, {
   useState,
 } from "react";
 import type { UserProfile, Role } from "./types";
-
-// ─── hard-coded admin accounts ────────────────────────────────────────────────
-const ADMIN_EMAILS = new Set([
-  "mehdi.jdidi@aiesec.net",
-  "aminetouati@aiesec.net",
-  "rayenyahyaoui@aiesec.net",
-]);
-
-const ADMIN_PROFILES: UserProfile[] = [
-  { id: "admin-mehdi", email: "mehdi.jdidi@aiesec.net", name: "Mehdi Jdidi", role: "admin", workspaceId: null, keyAreaId: null, hue: 260 },
-  { id: "admin-amine", email: "aminetouati@aiesec.net", name: "Amine Touati", role: "admin", workspaceId: null, keyAreaId: null, hue: 200 },
-  { id: "admin-rayen", email: "rayenyahyaoui@aiesec.net", name: "Rayen Yahyaoui", role: "admin", workspaceId: null, keyAreaId: null, hue: 140 },
-];
+import {
+  me,
+  login as loginFn,
+  logout as logoutFn,
+  listMembers,
+  createMember,
+  updateMember,
+  removeMember,
+} from "./db/auth-fns";
 
 // ─── context shape ────────────────────────────────────────────────────────────
 type AuthContextValue = {
   user: UserProfile | null;
   loading: boolean;
-  /** Login by email only — no password required */
-  login: (email: string) => Promise<{ error?: string }>;
+  /** Login by email + password — verified server-side against hashed passwords. */
+  login: (email: string, password: string) => Promise<{ error?: string }>;
   logout: () => void;
   isAdmin: boolean;
   isOCP: boolean;
@@ -34,19 +30,30 @@ type AuthContextValue = {
   canSeeWorkspace: (wsId: string) => boolean;
   canEditInWorkspace: (wsId: string) => boolean;
   canSeeKeyArea: (wsId: string, keyAreaId: string) => boolean;
-  /** All non-admin members added by admin */
+  /** All non-admin members added by admin (loaded from the server). */
   managedUsers: UserProfile[];
-  addManagedUser: (u: Omit<UserProfile, "id">) => void;
-  removeManagedUser: (id: string) => void;
-  updateManagedUser: (id: string, patch: Partial<Omit<UserProfile, "id">>) => void;
+  addManagedUser: (u: Omit<UserProfile, "id"> & { password: string }) => Promise<{ error?: string }>;
+  removeManagedUser: (id: string) => Promise<void>;
+  updateManagedUser: (
+    id: string,
+    patch: Partial<Omit<UserProfile, "id">> & { newPassword?: string },
+  ) => Promise<void>;
+  refreshMembers: () => void;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const SESSION_KEY = "cupola_session";
-const MANAGED_KEY = "cupola_managed_users";
-const MANAGED_VERSION_KEY = "cupola_managed_version";
-const CURRENT_MANAGED_VERSION = "2";
+function toProfile(u: any): UserProfile {
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    workspaceId: u.workspaceId ?? null,
+    keyAreaId: u.keyAreaId ?? null,
+    hue: u.hue ?? 220,
+  };
+}
 
 // ─── provider ─────────────────────────────────────────────────────────────────
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -54,49 +61,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [managed, setManaged] = useState<UserProfile[]>([]);
 
-  useEffect(() => {
-    try {
-      const sess = localStorage.getItem(SESSION_KEY);
-      if (sess) setUser(JSON.parse(sess));
-      const storedVersion = localStorage.getItem(MANAGED_VERSION_KEY);
-      if (storedVersion !== CURRENT_MANAGED_VERSION) {
-        localStorage.removeItem(MANAGED_KEY);
-        localStorage.removeItem("cupola_deleted_static_ids");
-        localStorage.setItem(MANAGED_VERSION_KEY, CURRENT_MANAGED_VERSION);
-      } else {
-        const mu = localStorage.getItem(MANAGED_KEY);
-        if (mu) setManaged(JSON.parse(mu));
-      }
-    } catch {
-      localStorage.removeItem(SESSION_KEY);
-    }
-    setLoading(false);
+  const refreshMembers = useCallback(() => {
+    listMembers()
+      .then((rows) => setManaged((rows as any[]).map(toProfile).filter((u) => u.role !== "admin")))
+      .catch(() => setManaged([]));
   }, []);
 
+  // Restore the session from the server-verified sealed cookie.
+  useEffect(() => {
+    me()
+      .then((u) => {
+        if (u) {
+          setUser(toProfile(u));
+          refreshMembers();
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [refreshMembers]);
+
   const login = useCallback(
-    async (email: string): Promise<{ error?: string }> => {
-      const e = email.toLowerCase().trim();
-
-      if (ADMIN_EMAILS.has(e)) {
-        const profile = ADMIN_PROFILES.find((a) => a.email === e)!;
-        setUser(profile);
-        localStorage.setItem(SESSION_KEY, JSON.stringify(profile));
+    async (email: string, password: string): Promise<{ error?: string }> => {
+      try {
+        const res = await loginFn({ data: { email: email.trim(), password } });
+        if ((res as any).error) return { error: (res as any).error };
+        const u = (res as any).user;
+        setUser(toProfile(u));
+        refreshMembers();
         return {};
+      } catch {
+        return { error: "Sign in failed. Please try again." };
       }
-
-      const found = managed.find((u) => u.email.toLowerCase() === e);
-      if (!found) return { error: "No account found for this email." };
-
-      setUser(found);
-      localStorage.setItem(SESSION_KEY, JSON.stringify(found));
-      return {};
     },
-    [managed],
+    [refreshMembers],
   );
 
   const logout = useCallback(() => {
+    logoutFn().catch(() => {});
     setUser(null);
-    localStorage.removeItem(SESSION_KEY);
+    setManaged([]);
   }, []);
 
   const isAdmin = user?.role === "admin";
@@ -135,31 +138,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const addManagedUser = useCallback(
-    (u: Omit<UserProfile, "id">) => {
-      const withId: UserProfile = { ...u, id: `mu-${Date.now()}` };
-      const updated = [...managed, withId];
-      setManaged(updated);
-      localStorage.setItem(MANAGED_KEY, JSON.stringify(updated));
+    async (u: Omit<UserProfile, "id"> & { password: string }) => {
+      const res = await createMember({
+        data: {
+          name: u.name,
+          email: u.email,
+          password: u.password,
+          role: u.role,
+          workspaceId: u.workspaceId ?? null,
+          keyAreaId: u.keyAreaId ?? null,
+          hue: u.hue,
+        },
+      });
+      if ((res as any).error) return { error: (res as any).error };
+      refreshMembers();
+      return {};
     },
-    [managed],
+    [refreshMembers],
   );
 
   const removeManagedUser = useCallback(
-    (id: string) => {
-      const updated = managed.filter((u) => u.id !== id);
-      setManaged(updated);
-      localStorage.setItem(MANAGED_KEY, JSON.stringify(updated));
+    async (id: string) => {
+      await removeMember({ data: { id } }).catch(() => {});
+      refreshMembers();
     },
-    [managed],
+    [refreshMembers],
   );
 
   const updateManagedUser = useCallback(
-    (id: string, patch: Partial<Omit<UserProfile, "id">>) => {
-      const updated = managed.map((u) => (u.id === id ? { ...u, ...patch } : u));
-      setManaged(updated);
-      localStorage.setItem(MANAGED_KEY, JSON.stringify(updated));
+    async (id: string, patch: Partial<Omit<UserProfile, "id">> & { newPassword?: string }) => {
+      await updateMember({
+        data: {
+          id,
+          role: patch.role,
+          workspaceId: patch.workspaceId,
+          keyAreaId: patch.keyAreaId,
+          newPassword: patch.newPassword,
+        },
+      }).catch(() => {});
+      refreshMembers();
     },
-    [managed],
+    [refreshMembers],
   );
 
   return (
@@ -180,6 +199,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         addManagedUser,
         removeManagedUser,
         updateManagedUser,
+        refreshMembers,
       }}
     >
       {children}

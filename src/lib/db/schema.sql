@@ -1,5 +1,5 @@
 -- ============================================================
--- Nucleus CRM — Neon PostgreSQL Schema
+-- Lupara CRM — Neon PostgreSQL Schema
 -- Run this entire file once in your Neon SQL editor
 -- ============================================================
 
@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   date         DATE NOT NULL,
   time         TEXT,
   type         TEXT NOT NULL DEFAULT 'event'
-                 CHECK (type IN ('deadline','meeting','event')),
+                 CHECK (type IN ('deadline','milestone','meeting','event','campaign')),
   source_id    TEXT,     -- id of the originating lead / pr_person / task
   source_table TEXT,     -- 'leads' | 'pr_people' | 'tasks'
   description  TEXT,

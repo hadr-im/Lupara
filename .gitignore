@@ -10,11 +10,17 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.vercel
 .output
 .vinxi
 .tanstack/**
 .nitro
 *.local
+
+# Secrets / env
+.env
+.env.*
+!.env.example
 
 # Wrangler / Cloudflare
 .wrangler/

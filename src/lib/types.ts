@@ -14,7 +14,7 @@ export type UserProfile = {
 
 export type AppNotification = {
   id: string;
-  type: "lead_pending" | "lead_validated" | "task_assigned" | "review_submitted" | "review_approved" | "review_rejected" | "partner_confirmed";
+  type: "lead_pending" | "lead_validated" | "lead_rejected" | "task_assigned" | "review_submitted" | "review_approved" | "review_rejected" | "partner_confirmed";
   title: string;
   message: string;
   leadId?: string;

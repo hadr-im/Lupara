@@ -243,7 +243,12 @@ function AdminPage() {
               toast.success("Member removed");
             }}
             onUpdate={(id, patch) => { updateManagedUser(id, patch); toast.success("Access updated"); }}
-            onAdd={(u) => { addManagedUser(u); toast.success(`${u.name} added`); }}
+            onAdd={async (u) => {
+              const res = await addManagedUser(u);
+              if (res?.error) { toast.error(res.error); return res; }
+              toast.success(`${u.name} added`);
+              return {};
+            }}
           />
         )}
         {tab === "validations" && (
@@ -284,13 +289,13 @@ function MembersTab({
   members: WorkspaceMember[];
   onRemove: (id: string) => void;
   onUpdate: (id: string, patch: any) => void;
-  onAdd: (u: any) => void;
+  onAdd: (u: any) => Promise<{ error?: string }>;
 }) {
   const [filterWs, setFilterWs] = useState("all");
   const [editing, setEditing] = useState<WorkspaceMember | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [editForm, setEditForm] = useState({ role: "oc" as Role, workspaceId: "", keyAreaId: "" });
-  const [addForm, setAddForm] = useState({ name: "", email: "", role: "oc" as Role, workspaceId: "", keyAreaId: "", hue: 220 });
+  const [addForm, setAddForm] = useState({ name: "", email: "", password: "", role: "oc" as Role, workspaceId: "", keyAreaId: "", hue: 220 });
 
   const filtered = useMemo(() => {
     if (filterWs === "all") return members;
@@ -312,11 +317,16 @@ function MembersTab({
     setEditing(null);
   };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!addForm.name || !addForm.email) { toast.error("Name and email required."); return; }
-    onAdd({ ...addForm, workspaceId: addForm.workspaceId || undefined, keyAreaId: addForm.keyAreaId || undefined, status: "invited" });
+    if (!addForm.password || addForm.password.length < 8) {
+      toast.error("Set an initial password (at least 8 characters).");
+      return;
+    }
+    const res = await onAdd({ ...addForm, workspaceId: addForm.workspaceId || undefined, keyAreaId: addForm.keyAreaId || undefined });
+    if (res?.error) return; // keep the modal open so the admin can fix it
     setShowAdd(false);
-    setAddForm({ name: "", email: "", role: "oc", workspaceId: "", keyAreaId: "", hue: 220 });
+    setAddForm({ name: "", email: "", password: "", role: "oc", workspaceId: "", keyAreaId: "", hue: 220 });
   };
 
   // All key areas are available for member assignment regardless of workspace allowedAreas
@@ -475,10 +485,11 @@ function MembersTab({
               <button onClick={() => setShowAdd(false)} className="text-muted-foreground hover:text-foreground"><X className="h-4 w-4" /></button>
             </div>
             <div className="space-y-3">
-              {[["name", "Full Name", "text"], ["email", "Email", "email"]].map(([k, l, t]) => (
+              {[["name", "Full Name", "text"], ["email", "Email", "email"], ["password", "Initial Password", "text"]].map(([k, l, t]) => (
                 <div key={k}>
                   <label className="block text-xs font-medium text-muted-foreground mb-1">{l}</label>
                   <input type={t} value={(addForm as any)[k]} onChange={(e) => setAddForm({ ...addForm, [k]: e.target.value })}
+                    placeholder={k === "password" ? "min. 8 characters — share with the member" : undefined}
                     className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
                 </div>
               ))}
@@ -535,6 +546,7 @@ function ValidationsTab({
   onPersistLeads: (updated: any[]) => void;
 }) {
   const { push } = useNotifications();
+  const { managedUsers } = useAuth();
 
   const validate = (lead: any) => {
     const updated = allLeads.map((l: any) =>
@@ -542,16 +554,17 @@ function ValidationsTab({
     );
     onPersistLeads(updated);
 
-    // Notify the OC who submitted the lead
-    const submitter = workspaceMembers.find((m) => m.id === lead.assigneeId);
-    if (submitter) {
+    // Notify the member who submitted the lead. The submitter is a managed user
+    // (their id === lead.assigneeId); resolve the role for correct targeting.
+    if (lead.assigneeId) {
+      const submitter = managedUsers.find((m) => m.id === lead.assigneeId);
       push({
         type: "lead_validated",
         title: "Your lead was validated!",
         message: `"${lead.company}" has been approved by admin. You can now progress it in the pipeline.`,
         leadId: lead.id,
-        targetRole: submitter.role,
-        targetUserId: submitter.id,
+        targetRole: submitter?.role ?? "oc",
+        targetUserId: lead.assigneeId,
         workspaceId: lead.workspaceId,
       });
     }
@@ -563,6 +576,20 @@ function ValidationsTab({
       l.id === lead.id ? { ...l, pendingValidation: false, validated: false, stage: "lost" } : l,
     );
     onPersistLeads(updated);
+
+    // Let the submitter know their lead was not approved.
+    if (lead.assigneeId) {
+      const submitter = managedUsers.find((m) => m.id === lead.assigneeId);
+      push({
+        type: "lead_rejected",
+        title: "Lead not approved",
+        message: `"${lead.company}" was not approved by admin and moved to Lost.`,
+        leadId: lead.id,
+        targetRole: submitter?.role ?? "oc",
+        targetUserId: lead.assigneeId,
+        workspaceId: lead.workspaceId,
+      });
+    }
     toast.success(`${lead.company} rejected — moved to Lost`);
   };
 
@@ -794,6 +821,7 @@ function ReviewsTab({
 // ─── PM Tasks Tab ─────────────────────────────────────────────────────────────
 function PmTasksTab({ tasks, onPersist }: { tasks: PmTask[]; onPersist: (u: PmTask[]) => void }) {
   const { push } = useNotifications();
+  const { managedUsers } = useAuth();
   const [filterWs, setFilterWs] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
 
@@ -812,10 +840,11 @@ function PmTasksTab({ tasks, onPersist }: { tasks: PmTask[]; onPersist: (u: PmTa
     );
     onPersist(updated);
 
-    // Notify assignees
+    // Notify assignees — target the real member accounts (managed users), not
+    // the static admin-only workspaceMembers list.
     if (task.assignedTo === "all") {
-      workspaceMembers
-        .filter((m) => m.workspaceId === task.workspaceId && m.role !== "oc")
+      managedUsers
+        .filter((m) => m.workspaceId === task.workspaceId)
         .forEach((m) => {
           push({
             type: "task_assigned",
@@ -828,7 +857,7 @@ function PmTasksTab({ tasks, onPersist }: { tasks: PmTask[]; onPersist: (u: PmTa
           });
         });
     } else {
-      const member = workspaceMembers.find((m) => m.id === task.assignedTo);
+      const member = managedUsers.find((m) => m.id === task.assignedTo);
       if (member) {
         push({
           type: "task_assigned",

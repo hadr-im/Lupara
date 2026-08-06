@@ -6,7 +6,7 @@ import {
   keyAreas,
   type CalendarEvent,
 } from "@/lib/mock/data";
-import { getMeetings, getTasks, getCalendarEvents, upsertCalendarEvent, deleteCalendarEvent, getPrPeople } from "@/lib/db/server-fns";
+import { getMeetings, getTasks, getCalendarEvents, upsertCalendarEvent, deleteCalendarEvent, getPrPeople, getPmTasks } from "@/lib/db/server-fns";
 import { useAuth } from "@/lib/auth-context";
 import { toast } from "sonner";
 import { Plus, X, ChevronLeft, ChevronRight, Calendar as CalIcon, Flag, Zap, Target, Clock, Mic, Tv, MapPin } from "lucide-react";
@@ -32,6 +32,7 @@ const AREA_COLORS: Record<string, string> = {
   dxp: "#ec4899",
   logistics: "#10b981",
   sales: "#3b82f6",
+  pm: "#a855f7",
 };
 
 const ALL_CALENDAR_AREAS = ["marketing", "content", "pr", "dxp", "logistics", "sales"];
@@ -61,6 +62,7 @@ function CalendarPage() {
   const [tasks, setTasks] = useState<any[]>([]);
   const [calendarEvents, setCalendarEvents] = useState<any[]>([]);
   const [prPeople, setPrPeople] = useState<any[]>([]);
+  const [pmTasks, setPmTasks] = useState<any[]>([]);
 
   const fetchAllData = () => {
     getMeetings({ data: { workspaceId: workspace } })
@@ -74,6 +76,9 @@ function CalendarPage() {
       .catch(console.error);
     getPrPeople({ data: { workspaceId: workspace } })
       .then((pList) => setPrPeople(pList as any[]))
+      .catch(console.error);
+    getPmTasks({ data: { workspaceId: workspace } })
+      .then((pmList) => setPmTasks(pmList as any[]))
       .catch(console.error);
   };
 
@@ -96,50 +101,63 @@ function CalendarPage() {
     }));
   }, [calendarEvents]);
 
-  // Merge task due dates as calendar events
+  // Merge task due dates as calendar events.
+  // NOTE: getTasks() returns camelCase fields (workspaceId / dueDate / areaId).
   const taskEvents = useMemo(() => {
     return tasks
-      .filter((t: any) => t.workspace_id === workspace && t.due_date && CALENDAR_AREAS.includes(t.area_id))
+      .filter((t: any) => t.workspaceId === workspace && t.dueDate && CALENDAR_AREAS.includes(t.areaId))
       .map((t: any) => ({
-        id: `task-${t.id}`, workspaceId: workspace, areaId: t.area_id,
-        title: t.title, date: t.due_date.includes("-") ? t.due_date.slice(0, 10) : "",
+        id: `task-${t.id}`, workspaceId: workspace, areaId: t.areaId,
+        title: t.title, date: t.dueDate.includes("-") ? t.dueDate.slice(0, 10) : "",
         type: "deadline" as const, description: `Task deadline · ${(t.status ?? "").replace("_", " ")}`,
       })) as CalendarEvent[];
   }, [tasks, workspace, CALENDAR_AREAS]);
 
-  // Sales meetings → calendar
+  // Sales meetings → calendar. getMeetings() returns camelCase (date / time / partnerName).
   const meetingEvents = useMemo(() => {
     return meetings
-      .filter((m: any) => m.workspace_id === workspace && m.scheduled_date && m.status === "scheduled")
+      .filter((m: any) => m.workspaceId === workspace && m.date && m.status === "scheduled")
       .map((m: any) => ({
         id: `meeting-${m.id}`, workspaceId: workspace, areaId: "sales",
-        title: `Meeting: ${m.company}`, date: m.scheduled_date.slice(0, 10),
-        time: m.scheduled_time ?? "",
+        title: `Meeting: ${m.partnerName}`, date: m.date.slice(0, 10),
+        time: m.time ?? "",
         type: "meeting" as const,
         description: m.notes ?? "",
         location: m.location ?? "",
-        assignedOcName: m.assigned_oc_name ?? "",
-        assignedOcHue: m.assigned_oc_hue ?? 220,
+        assignedOcName: m.assignedOcName ?? "",
+        assignedOcHue: m.assignedOcHue ?? 220,
       }));
   }, [meetings, workspace]);
 
-  // PR confirmed interventions → calendar
+  // PR confirmed interventions → calendar. getPrPeople() returns camelCase.
   const prEvents = useMemo(() => {
     return prPeople
-      .filter((p: any) => (workspace === "pmewa" || p.workspace_id === workspace) && p.stage === "confirmed" && p.confirmed_date)
+      .filter((p: any) => (workspace === "pmewa" || p.workspaceId === workspace) && p.stage === "confirmed" && p.confirmedDate)
       .map((p: any) => ({
-        id: `pr-${p.id}`, workspaceId: p.workspace_id, areaId: "pr",
-        title: `${p.type === "speaker" ? "🎤" : "📺"} ${p.name}`, date: p.confirmed_date.slice(0, 10),
-        type: "event" as const, description: `${p.confirmed_time ?? ""} · ${p.type === "speaker" ? `Topic: ${p.topic ?? "TBD"}` : p.media_type ?? "Media"} · ${p.organization}`,
+        id: `pr-${p.id}`, workspaceId: p.workspaceId, areaId: "pr",
+        title: `${p.type === "speaker" ? "🎤" : "📺"} ${p.name}`, date: p.confirmedDate.slice(0, 10),
+        type: "event" as const, description: `${p.confirmedTime ?? ""} · ${p.type === "speaker" ? `Topic: ${p.topic ?? "TBD"}` : p.mediaType ?? "Media"} · ${p.organization}`,
       })) as CalendarEvent[];
   }, [prPeople, workspace]);
 
+  // PM department task deadlines → calendar (published tasks with a due date).
+  const pmTaskEvents = useMemo(() => {
+    return pmTasks
+      .filter((t: any) => t.dueDate && t.dueDate.includes("-") && t.status !== "draft")
+      .map((t: any) => ({
+        id: `pmtask-${t.id}`, workspaceId: workspace, areaId: "pm",
+        title: t.title, date: t.dueDate.slice(0, 10),
+        type: "deadline" as const,
+        description: `PM task · ${(t.status ?? "").replace("_", " ")}${t.assignedToName ? ` · ${t.assignedToName}` : ""}`,
+      })) as CalendarEvent[];
+  }, [pmTasks, workspace]);
+
   const allEvents = useMemo(() => {
-    const merged = [...events, ...taskEvents, ...meetingEvents, ...prEvents].filter(
+    const merged = [...events, ...taskEvents, ...meetingEvents, ...prEvents, ...pmTaskEvents].filter(
       (e, i, arr) => arr.findIndex((x) => x.id === e.id) === i
     );
     return filterArea === "all" ? merged : merged.filter((e) => e.areaId === filterArea);
-  }, [events, taskEvents, meetingEvents, prEvents, filterArea]);
+  }, [events, taskEvents, meetingEvents, prEvents, pmTaskEvents, filterArea]);
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDayOfWeek = new Date(year, month, 1).getDay();
@@ -147,6 +165,8 @@ function CalendarPage() {
 
   const pad = (n: number) => String(n).padStart(2, "0");
   const dateStr = (d: number) => `${year}-${pad(month + 1)}-${pad(d)}`;
+  // Local (not UTC) "today" so the highlight is correct near midnight.
+  const todayStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
 
   const eventsByDate = useMemo(() => {
     const map: Record<string, any[]> = {};
@@ -171,7 +191,7 @@ function CalendarPage() {
   };
 
   const openEdit = (e: any) => {
-    if (e.id.startsWith("task-") || e.id.startsWith("meeting-") || e.id.startsWith("pr-")) return; // read-only
+    if (e.id.startsWith("task-") || e.id.startsWith("meeting-") || e.id.startsWith("pr-") || e.id.startsWith("pmtask-")) return; // read-only
     setEditingId(e.id);
     setForm({ title: e.title, areaId: e.areaId, date: e.date, endDate: e.endDate ?? "", type: e.type, description: e.description, assignedTo: e.assignedTo ?? "" });
     setShowForm(true);
@@ -266,7 +286,7 @@ function CalendarPage() {
               const day = i + 1;
               const ds = dateStr(day);
               const dayEvents = eventsByDate[ds] ?? [];
-              const isToday = ds === today.toISOString().slice(0, 10);
+              const isToday = ds === todayStr;
               const isSelected = selectedDay === ds;
               return (
                 <div key={ds} onClick={() => setSelectedDay(isSelected ? null : ds)}
@@ -342,6 +362,7 @@ function CalendarPage() {
                   const isTask = ev.id.startsWith("task-");
                   const isMeeting = ev.id.startsWith("meeting-");
                   const isPr = ev.id.startsWith("pr-");
+                  const isPmTask = ev.id.startsWith("pmtask-");
                   return (
                     <div key={ev.id} className="rounded-2xl border border-border/60 bg-card p-4">
                       <div className="flex items-start gap-2 mb-2">
@@ -381,11 +402,15 @@ function CalendarPage() {
                         </div>
                       )}
                       {ev.assignedTo && !isMeeting && <div className="text-xs text-muted-foreground mt-1">Assigned: {ev.assignedTo}</div>}
-                      {!isTask && !isMeeting && !isPr && canEdit && (
+                      {!isTask && !isMeeting && !isPr && !isPmTask && canEdit && (
                         <div className="flex gap-2 mt-2">
                           <button onClick={() => openEdit(ev)} className="flex-1 rounded-lg border border-border/60 py-1 text-xs hover:bg-sidebar-accent/40">Edit</button>
                           {isAdmin && <button onClick={() => deleteEvent(ev.id)} className="rounded-lg border border-destructive/30 px-2.5 py-1 text-xs text-destructive hover:bg-destructive/5">Del</button>}
                         </div>
+                      )}
+                      {isPmTask && (
+                        <Link to="/$workspace/pm-tasks" params={{ workspace }}
+                          className="mt-2 block text-center text-xs text-primary hover:underline">View PM task →</Link>
                       )}
                       {isTask && (
                         <Link to="/$workspace/tasks" params={{ workspace }} search={{ area: ev.areaId }}
